@@ -13,6 +13,8 @@
 # I hope it's going to be useful.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+clear
+
 # Debug mode
 # set -x
 
@@ -24,6 +26,8 @@ BP_TARGET="/root/backups-ipsec"
 SYSCTL_CONF="/etc/sysctl.conf"
 # Current date and time
 CUR_DATE=$(date +'%m-%d-%Y-%H-%M-%S')
+# SSH server port
+SSHD_PORT=$(sshd -T | grep "^port " | cut -d " " -f2)
 TMP="tmp$$"
 
 if [[ $EUID -ne 0 ]]; then
@@ -108,7 +112,7 @@ backup_everything()
 	cp -Pr /etc/ipsec.secrets ${BP_TARGET}/etc_ipsec.secrets-${CUR_DATE}
 	cp -P /etc/ipsec.conf ${BP_TARGET}/ipsec.conf-${CUR_DATE}
 	cp -P ${SYSCTL_CONF} ${BP_TARGET}${SYSCTL_CONF}-${CUR_DATE} 
-	iptables-save > ${BP_TARGET}/iptables-backup-${CUR_DATE}	
+	iptables-save > ${BP_TARGET}/iptables-backup-${CUR_DATE} >/dev/null 2>&1
 	echo "100" | dialog --title "Backup existing configuration" --backtitle "${SCRIPT_DESC}" --gauge "Done." 10 70 0
 	dialog --title "Backup existing configuration" --backtitle "${SCRIPT_DESC}" --pause "Existing configuration has been backed up (if it existed)." 10 70 3
 fi
@@ -127,7 +131,6 @@ cert_setup()
 	echo "20" | dialog --title "Setup certificate structure" --backtitle "${SCRIPT_DESC}" --gauge "Creating a self singed root CA private key ..." 10 70 0
 	ipsec pki --gen --type rsa --size 4096 --outform der > private/strongswanKey.der
 	chmod 600 private/strongswanKey.der
-
 	echo "40" | dialog --title "Setup certificate structure" --backtitle "${SCRIPT_DESC}" --gauge "Generating a self signed root CA certificate of the private key ..." 10 75 0
 	ipsec pki --self --ca --lifetime 3650 --in private/strongswanKey.der --type rsa --dn "C=${COUNTRY}, O=${ORGANIZATION}, CN=strongSwan Root CA" --outform der > cacerts/strongswanCert.der
 
@@ -140,10 +143,12 @@ cert_setup()
 
 	echo "100" | dialog --title "Setup certificate structure" --backtitle "${SCRIPT_DESC}" --gauge "Done." 10 70 0
 	dialog --title "Setup certificate structure" --backtitle "${SCRIPT_DESC}" --pause "Certificate structure has been setup successfully." 10 70 3
+# ipsec listcerts can tell much about possible errors.
 }
 
 user_key()
 {
+	cd /etc/ipsec.d/
 	KEY_NAME=$(dialog --title "Information required" --backtitle "${SCRIPT_DESC}" --inputbox "Enter the name of the user:" 8 40 3>&1 1>&2 2>&3 3>&-)	
 	echo "20" | dialog --title "Generate new user's key" --backtitle "${SCRIPT_DESC}" --gauge "Generating private key ..." 10 70 0
 
@@ -151,7 +156,7 @@ user_key()
 	chmod 600 private/${KEY_NAME}Key.der
 
 	echo "40" | dialog --title "Generate new user's key" --backtitle "${SCRIPT_DESC}" --gauge "Public key, signed by our root CA we generated ..." 10 70 0
-	ipsec pki --pub --in private/${KEY_NAME}Key.der --type rsa | ipsec pki --issue --lifetime 730 --cacert cacerts/strongswanCert.der --cakey private/strongswanKey.der --dn "C=PL, O=Taczkowski.net, CN=${KEY_NAME}@${SERVER_DOMAIN_DN}" --san "${KEY_NAME}@${SERVER_DOMAIN_DN}" --san "${KEY_NAME}@${GLOBAL_SERVER_IP}" --outform der > certs/${KEY_NAME}Cert.der
+	ipsec pki --pub --in private/${KEY_NAME}Key.der --type rsa | ipsec pki --issue --lifetime 730 --cacert cacerts/strongswanCert.der --cakey private/strongswanKey.der --dn "C=PL, O=${ORGANIZATION}, CN=${KEY_NAME}@${SERVER_DOMAIN_DN}" --san "${KEY_NAME}@${SERVER_DOMAIN_DN}" --san "${KEY_NAME}@${GLOBAL_SERVER_IP}" --outform der > certs/${KEY_NAME}Cert.der
 
 	echo "60" | dialog --title "Generate new user's key" --backtitle "${SCRIPT_DESC}" --gauge "Preparing to generate P12 file ..." 10 70 0
 	openssl rsa -inform DER -in private/${KEY_NAME}Key.der -out private/${KEY_NAME}Key.pem -outform PEM
@@ -166,39 +171,49 @@ user_key()
 
 ipsec_config()
 {
-	echo "90" | dialog --title "Setup configuration file" --backtitle "${SCRIPT_DESC}" --gauge "Writing new IPSec configuration file ..." 10 70 0
+	echo "90" | dialog --title "Setup configuration file" --backtitle "${SCRIPT_DESC}" --gauge "Writing new IPSec configuration files ..." 10 70 0
 	echo "# IPSec configuration file - generated on ${CUR_DATE} by ${SCRIPT_DESC}
 config setup
-	charondebug=\"ike 2, knl 2, cfg 2, net 2, esp 2, dmn 2, mgr 2\"
-	uniqueids=never
+        charondebug="ike 2, knl 2, cfg 2, net 2, esp 2, dmn 2, mgr 2"
+        uniqueids=never
 
 conn %default
-	keyexchange=ikev2
-	ike=aes128-sha256-modp3072
-	esp=aes128-sha256-modp3072
-	fragmentation=yes
-	reauth=yes
-	forceencaps=no
-	rekey=yes
-	dpdaction=clear
-	dpddelay=300s
-	authby=pubkey
-	left=%any
-	leftid=${SERVER_DOMAIN_DN}
-	leftsubnet=0.0.0.0/0
-	leftcert=vpnHostCert.der
-	leftsendcert=always
-	right=%any
-	rightsourceip=${VPN_NET}
-	rightdns=8.8.8.8
+        keyexchange=ikev2
+        ike=aes128-sha256-modp3072
+        # ike=chacha20poly1305-sha512-curve25519-prfsha512,aes256gcm16-sha384-prfsha384-ecp384,aes256-sha1-modp1024,aes128-sha1-modp1024,3des-sha1-modp1024!
+        esp=aes128-sha256-modp3072
+        # esp=chacha20poly1305-sha512,aes256gcm16-ecp384,aes256-sha256,aes256-sha1,3des-sha1!
+        eap_identity=%identity
+        forceencaps=yes
+        fragmentation=yes
+        reauth=yes
+        forceencaps=no
+        rekey=yes
+        dpdaction=clear
+        dpddelay=300s
+        authby=pubkey
+        left=%any
+        leftid=${SERVER_DOMAIN_DN}
+        leftsubnet=0.0.0.0/0
+        leftcert=vpnHostCert.der
+        leftsendcert=always
+        right=%any
+        rightid=%any
+        rightsendcert=never
+        rightsourceip=${VPN_NET}
+        rightdns=8.8.8.8
+        type=tunnel
 
 conn IPSec-IKEv2
-	keyexchange=ikev2
+        keyexchange=ikev2
 	auto=add" > /etc/ipsec.conf
+
+	echo ": RSA vpnHostKey.der" > /var/lib/strongswan/ipsec.secrets.inc
 	chown root:root /etc/ipsec.conf
 	chmod 644 /etc/ipsec.conf
 	echo "100" | dialog --title "Setup configuration file" --backtitle "${SCRIPT_DESC}" --gauge "Done." 10 70 0
         dialog --title "Setup configuration file" --backtitle "${SCRIPT_DESC}" --pause "Configuration file has been written." 10 70 3
+	systemctl restart ipsec >/dev/null 2>&1
 }
 
 tunables_setup()
@@ -230,20 +245,30 @@ iptables_setup()
 {
         echo "15" | dialog --title "Setting firewall rules" --backtitle "${SCRIPT_DESC}" --gauge "Setting iptables rules ..." 10 70 0
 
-	# Set permissive policy
-	iptables -P INPUT ACCEPT
-	iptables -P FORWARD ACCEPT
+	# Installing required package
+	apt-get -yqq install iptables-persistent
 
 	# Flush firewall rules and counters
 	iptables -F
 	iptables -F -t nat
 	iptables -Z
+	rm -f /etc/iptables/rules.v?
 
-	# Don't interrupt existing connections
+        # Set permissive policy
+        iptables -P INPUT ACCEPT
+        iptables -P FORWARD ACCEPT
+
+	# Don't interrupt existing connections and the ones initiated by the server
 	iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-	# Open SSH port
-	iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+	if [ ! -z "${SSHD_PORT}" ]
+	then
+	        # Open SSH port for remote administration only if there is an SSH server running and configured
+	        iptables -A INPUT -p tcp --dport ${SSHD_PORT} -j ACCEPT 
+	fi
+
+#	iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+#	iptables -A INPUT -p tcp --dport 19999 -j ACCEPT
 
 	# Accept connections on the local loopback interface
 	iptables -I INPUT 1 -i lo -p all -j ACCEPT
@@ -263,18 +288,17 @@ iptables_setup()
 	iptables -t nat -A POSTROUTING -s ${VPN_NET} -o ${IFACE} -m policy --pol ipsec --dir out -j ACCEPT
 	iptables -t nat -A POSTROUTING -s ${VPN_NET} -o ${IFACE} -j MASQUERADE
 
-	# To prevent IP packet fragmentation on some clients, we'll tell IPTables to reduce the size of packets by adjusting the packets' maximum segment size. This prevents issues with some VPN clients.
+	# To prevent IP packet fragmentation on some clients, we'll tell IPTables to reduce the size of packets by adjusting the packet's maximum segment size. This prevents issues with some VPN clients.
 	iptables -t mangle -A FORWARD --match policy --pol ipsec --dir in -s ${VPN_NET} -o ${IFACE} -p tcp -m tcp --tcp-flags SYN,RST SYN -m tcpmss --mss 1361:1536 -j TCPMSS --set-mss 1360
 
-	# IPSec part – end
+	# IPSec part - end
 
 	# Drop everything else
 	iptables -A INPUT -j DROP
 	iptables -A FORWARD -j DROP
 
 	# Saving the changes
-	netfilter-persistent save >/dev/null 2>&1
-	netfilter-persistent reload >/dev/null 2>&1
+	iptables-save > /etc/iptables/rules.v4
 }
 
 service_autostart()
@@ -287,7 +311,7 @@ service_autostart()
         echo "100" | dialog --title "Making services start automatically" --backtitle "${SCRIPT_DESC}" --gauge "Service has been started and will start automatically during boot." 10 70 0
 	sleep 1
         dialog --title "Making services start automatically" --backtitle "${SCRIPT_DESC}" --pause "Service has been started and will start automatically during boot." 10 70 3
-        dialog --title "Services status" --backtitle "${SCRIPT_DESC}" --pause "`ipsec statusall`" 35 70 10 
+        dialog --title "Services status" --backtitle "${SCRIPT_DESC}" --pause "`ipsec statusall`" 35 70 10
 }
 
 help_text()
