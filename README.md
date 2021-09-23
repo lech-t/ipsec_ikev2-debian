@@ -1,5 +1,7 @@
 # ipsec_ikev2-debian
-IPSec IKEv2 Roadwarior Automatic Setup Bash Script
+IPSec IKEv2 Roadwarior Automatic Setup Bash Script.
+
+It has been written and tested on Debian Buster, but with or without minor adjustments it should also work on other flavors.
 
 This script can be useful for setting up IPSec server with Strongswan + IKEv2 + key authentication (Roadwarrior).
 It allows users to get secure access to another network over an unsecure network (Internet).
